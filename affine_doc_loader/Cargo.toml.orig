@@ -1,0 +1,26 @@
+[package]
+authors.workspace      = true
+categories             = ["text-processing"]
+description            = "AFFiNE document parsing and rendering utilities."
+edition.workspace      = true
+exclude                = ["/src/tests/**"]
+homepage.workspace     = true
+keywords               = ["affine", "document", "loader"]
+license.workspace      = true
+name                   = "affine_doc_loader"
+repository.workspace   = true
+rust-version.workspace = true
+version                = "0.1.7"
+
+[dependencies]
+chrono         = { workspace = true, features = ["serde"] }
+nanoid         = { workspace = true }
+pulldown-cmark = { workspace = true }
+serde          = { workspace = true, features = ["derive"] }
+serde_json     = { workspace = true }
+sha2           = { workspace = true }
+thiserror      = { workspace = true }
+y-octo         = { workspace = true }
+
+[dev-dependencies]
+assert-json-diff = { workspace = true }

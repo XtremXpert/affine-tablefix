@@ -1,0 +1,77 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AFFINE_REF: v0.27.4
+  IMAGE: ghcr.io/xtremxpert/affine
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    # Même glibc (2.36) que l'image officielle, basée sur Debian bookworm.
+    container: rust:bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: toeverything/AFFiNE
+          ref: ${{ env.AFFINE_REF }}
+          path: affine
+      - name: Brancher le crate corrigé
+        run: |
+          printf '\n[patch.crates-io]\naffine_doc_loader = { path = "../affine_doc_loader" }\n' >> affine/Cargo.toml
+          apt-get update && apt-get install -y --no-install-recommends clang
+          cd affine && cargo update -p affine_doc_loader
+          cargo pkgid affine_doc_loader | grep -q '^path+' || { echo "patch non appliqué"; exit 1; }
+      - uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry
+            affine/target
+          key: native-${{ env.AFFINE_REF }}-${{ hashFiles('affine_doc_loader/**') }}
+          restore-keys: native-${{ env.AFFINE_REF }}-
+      - name: Tests du crate
+        run: cd affine_doc_loader && cargo test --test table_cells
+      - name: Compiler affine_server_native
+        working-directory: affine
+        env:
+          CC: clang -D_BSD_SOURCE
+          TARGET_CC: clang -D_BSD_SOURCE
+          CARGO_PROFILE_RELEASE_LTO: thin
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+        run: |
+          cargo build --release -p affine_server_native --target x86_64-unknown-linux-gnu
+          cp target/x86_64-unknown-linux-gnu/release/libaffine_server_native.so ../server-native.x64.node
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-native-x64
+          path: server-native.x64.node
+
+  image:
+    needs: native
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-native-x64
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:0.27.4-tablefix
+            ${{ env.IMAGE }}:0.27.4-tablefix-${{ github.sha }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
