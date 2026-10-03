@@ -1,0 +1,293 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 69ebe38..afa0d84 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -267,7 +267,7 @@ fn table_props(rows: &[Vec<String>], id: &str) -> JsonValue {
+         column_id.clone(),
+         json!({
+           "columnId": column_id,
+-          "order": format!("{index:06}")
++          "order": schema::table_order_key(index)
+         }),
+       );
+       column_id
+@@ -280,7 +280,7 @@ fn table_props(rows: &[Vec<String>], id: &str) -> JsonValue {
+       row_id.clone(),
+       json!({
+         "rowId": row_id,
+-        "order": format!("{row_index:06}")
++        "order": schema::table_order_key(row_index)
+       }),
+     );
+     for (column_index, column_id) in column_ids.iter().enumerate() {
+diff --git a/src/schema.rs b/src/schema.rs
+index f14b4fd..1ef5d14 100644
+--- a/src/schema.rs
++++ b/src/schema.rs
+@@ -52,6 +52,31 @@ pub(super) fn table_column_order_key(column_id: &str) -> String {
+   format!("{PROP_COLUMNS_PREFIX}{column_id}{PROP_ORDER_SUFFIX}")
+ }
+ 
++const ORDER_KEY_DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
++
++/// Order key of the `index`-th table row or column, in the fractional-indexing
++/// format used by the editor (`a0`..`az`, then `b00`..`bzz`, ...). Keys sort in
++/// index order and are accepted by `generateKeyBetween` when rows or columns
++/// are inserted later.
++pub(super) fn table_order_key(index: usize) -> String {
++  let base = ORDER_KEY_DIGITS.len();
++  let mut remaining = index;
++  let mut width = 1;
++  let mut capacity = base;
++  while remaining >= capacity {
++    remaining -= capacity;
++    width += 1;
++    capacity *= base;
++  }
++  let mut digits = vec![b'0'; width];
++  for slot in digits.iter_mut().rev() {
++    *slot = ORDER_KEY_DIGITS[remaining % base];
++    remaining /= base;
++  }
++  let head = (b'a' + (width - 1) as u8) as char;
++  format!("{head}{}", String::from_utf8(digits).expect("ascii digits"))
++}
++
+ pub(super) fn table_cell_text_key(row_id: &str, column_id: &str) -> String {
+   format!("{PROP_CELLS_PREFIX}{row_id}:{column_id}{PROP_TEXT_SUFFIX}")
+ }
+diff --git a/src/write/builder.rs b/src/write/builder.rs
+index d0cc4d4..338d58c 100644
+--- a/src/write/builder.rs
++++ b/src/write/builder.rs
+@@ -5,7 +5,7 @@ use super::{
+     PROP_CAPTION, PROP_CELLS_PREFIX, PROP_CHECKED, PROP_COLUMNS_PREFIX, PROP_HEIGHT, PROP_LANGUAGE, PROP_ORDER,
+     PROP_ROWS_PREFIX, PROP_SOURCE_ID, PROP_TEXT, PROP_TYPE, PROP_URL, PROP_VIDEO_ID, PROP_WIDTH, SYS_CHILDREN,
+     SYS_FLAVOUR, SYS_ID, SYS_VERSION, table_cell_text_key, table_column_id_key, table_column_order_key,
+-    table_row_id_key, table_row_order_key,
++    table_order_key, table_row_id_key, table_row_order_key,
+   },
+   *,
+ };
+@@ -13,7 +13,6 @@ use super::{
+ pub(super) const BOXED_NATIVE_TYPE: &str = "$blocksuite:internal:native$";
+ pub(super) const NOTE_BG_LIGHT: &str = "#ffffff";
+ pub(super) const NOTE_BG_DARK: &str = "#252525";
+-const TABLE_ORDER_WIDTH: usize = 6;
+ 
+ pub(super) fn block_version(flavour: &str) -> i32 {
+   match flavour {
+@@ -250,7 +249,7 @@ pub(super) fn apply_embed_iframe_block_props(
+   Ok(())
+ }
+ 
+-pub(super) fn apply_table_block_props(block: &mut Map, rows: &[Vec<String>]) -> Result<(), ParseError> {
++pub(super) fn apply_table_block_props(doc: &Doc, block: &mut Map, rows: &[Vec<String>]) -> Result<(), ParseError> {
+   clear_table_props(block);
+ 
+   if rows.is_empty() {
+@@ -261,20 +260,26 @@ pub(super) fn apply_table_block_props(block: &mut Map, rows: &[Vec<String>]) ->
+   let column_ids: Vec<String> = (0..column_count).map(|_| nanoid::nanoid!()).collect();
+ 
+   for (col_idx, column_id) in column_ids.iter().enumerate() {
+-    let order = format_table_order(col_idx);
++    let order = table_order_key(col_idx);
+     block.insert(table_column_id_key(column_id), Any::String(column_id.to_string()))?;
+     block.insert(table_column_order_key(column_id), Any::String(order))?;
+   }
+ 
+   for (row_idx, row) in rows.iter().enumerate() {
+     let row_id = nanoid::nanoid!();
+-    let order = format_table_order(row_idx);
++    let order = table_order_key(row_idx);
+     block.insert(table_row_id_key(&row_id), Any::String(row_id.to_string()))?;
+     block.insert(table_row_order_key(&row_id), Any::String(order))?;
+ 
+     for (col_idx, column_id) in column_ids.iter().enumerate() {
+-      let cell_text = row.get(col_idx).cloned().unwrap_or_default();
+-      block.insert(table_cell_text_key(&row_id, column_id), Any::String(cell_text))?;
++      // The editor binds every cell to a Y.Text: a plain string renders as an empty cell.
++      let cell_text = row.get(col_idx).map(String::as_str).unwrap_or_default();
++      insert_text(
++        doc,
++        block,
++        &table_cell_text_key(&row_id, column_id),
++        &text_ops_from_plain(cell_text),
++      )?;
+     }
+   }
+ 
+@@ -362,7 +367,7 @@ pub(super) fn apply_block_spec(
+         .table
+         .as_ref()
+         .ok_or_else(|| ParseError::ParserError("table spec missing".into()))?;
+-      apply_table_block_props(block, &table.rows)?;
++      apply_table_block_props(doc, block, &table.rows)?;
+     }
+     _ => {
+       let props = TextBlockProps {
+@@ -417,9 +422,6 @@ fn clear_table_props(block: &mut Map) {
+   }
+ }
+ 
+-fn format_table_order(index: usize) -> String {
+-  format!("{index:0width$}", width = TABLE_ORDER_WIDTH)
+-}
+ 
+ pub(super) fn boxed_empty_map(doc: &Doc) -> Result<Map, ParseError> {
+   doc.create_map().map_err(ParseError::from)
+diff --git a/tests/table_cells.rs b/tests/table_cells.rs
+new file mode 100644
+index 0000000..5e180bc
+--- /dev/null
++++ b/tests/table_cells.rs
+@@ -0,0 +1,149 @@
++//! Regression test for tables written from markdown (toeverything/AFFiNE#15466):
++//! cells must be Y.Text and row/column orders must be fractional-indexing keys,
++//! otherwise the editor renders empty cells and cannot insert rows or columns.
++
++use affine_doc_loader::{build_full_doc, update_doc};
++use y_octo::{Any, Doc, DocOptions, Map, Value};
++
++const DOC_ID: &str = "table-doc";
++
++/// Returns the doc with the table block: the map is only readable while its doc is alive.
++fn table_block(binary: &[u8]) -> (Doc, Map) {
++  let mut doc = DocOptions::new().with_guid(DOC_ID.to_string()).build();
++  doc.apply_update_from_binary_v1(binary).expect("valid update");
++  let blocks = doc.get_map("blocks").expect("blocks map");
++  let block = blocks
++    .values()
++    .filter_map(|value| value.to_map())
++    .find(|block| matches!(block.get("sys:flavour"), Some(Value::Any(Any::String(f))) if f == "affine:table"))
++    .expect("table block");
++  (doc, block)
++}
++
++fn orders(block: &Map, prefix: &str) -> Vec<String> {
++  let mut orders: Vec<(String, String)> = block
++    .keys()
++    .filter(|key| key.starts_with(prefix) && key.ends_with(".order"))
++    .map(|key| {
++      let order = match block.get(key) {
++        Some(Value::Any(Any::String(order))) => order,
++        other => panic!("order {key} is not a string: {other:?}"),
++      };
++      (key.to_string(), order)
++    })
++    .collect();
++  orders.sort_by(|a, b| a.1.cmp(&b.1));
++  orders.into_iter().map(|(_, order)| order).collect()
++}
++
++fn cell_texts(block: &Map) -> Vec<String> {
++  let mut texts: Vec<String> = block
++    .keys()
++    .filter(|key| key.starts_with("prop:cells.") && key.ends_with(".text"))
++    .map(|key| {
++      block
++        .get(key)
++        .and_then(|value| value.to_text())
++        .unwrap_or_else(|| panic!("cell {key} is not a Y.Text"))
++        .to_string()
++    })
++    .collect();
++  texts.sort();
++  texts
++}
++
++fn assert_valid_order_keys(keys: &[String], expected: usize) {
++  assert_eq!(keys.len(), expected);
++  for key in keys {
++    let head = key.as_bytes()[0];
++    assert!(head.is_ascii_lowercase(), "order key {key} must start with a-z");
++    assert_eq!(key.len(), (head - b'a') as usize + 2, "order key {key} has a wrong length");
++  }
++}
++
++#[test]
++fn created_table_cells_are_text_with_fractional_orders() {
++  let markdown = "| Nom | Valeur |\n|---|---|\n| a | 1 |\n| b | 2 |\n";
++  let binary = build_full_doc("Table", markdown, DOC_ID).expect("doc");
++  let (_doc, block) = table_block(&binary);
++
++  assert_eq!(cell_texts(&block), ["1", "2", "Nom", "Valeur", "a", "b"]);
++  let rows = orders(&block, "prop:rows.");
++  assert_eq!(rows, ["a0", "a1", "a2"]);
++  assert_valid_order_keys(&rows, 3);
++  assert_eq!(orders(&block, "prop:columns."), ["a0", "a1"]);
++}
++
++#[test]
++fn many_rows_keep_their_order() {
++  let mut markdown = String::from("| n |\n|---|\n");
++  for i in 0..99 {
++    markdown.push_str(&format!("| {i} |\n"));
++  }
++  let binary = build_full_doc("Table", &markdown, DOC_ID).expect("doc");
++  let (_doc, block) = table_block(&binary);
++  let rows = orders(&block, "prop:rows.");
++  assert_valid_order_keys(&rows, 100);
++  assert_eq!(rows[61], "az");
++  assert_eq!(rows[62], "b00");
++
++  // Rows sorted by order key must come back in markdown order.
++  let mut by_order: Vec<(String, String)> = block
++    .keys()
++    .filter(|key| key.starts_with("prop:rows.") && key.ends_with(".order"))
++    .map(|key| {
++      let row_id = key.trim_start_matches("prop:rows.").trim_end_matches(".order").to_string();
++      let order = match block.get(key) {
++        Some(Value::Any(Any::String(order))) => order,
++        _ => unreachable!(),
++      };
++      (order, row_id)
++    })
++    .collect();
++  by_order.sort();
++  let column_key = block
++    .keys()
++    .find(|key| key.starts_with("prop:columns.") && key.ends_with(".columnId"))
++    .unwrap()
++    .to_string();
++  let column_id = match block.get(&column_key) {
++    Some(Value::Any(Any::String(id))) => id,
++    _ => unreachable!(),
++  };
++  let values: Vec<String> = by_order
++    .iter()
++    .map(|(_, row_id)| {
++      block
++        .get(&format!("prop:cells.{row_id}:{column_id}.text"))
++        .and_then(|value| value.to_text())
++        .unwrap()
++        .to_string()
++    })
++    .collect();
++  let mut expected = vec!["n".to_string()];
++  expected.extend((0..99).map(|i| i.to_string()));
++  assert_eq!(values, expected);
++}
++
++#[test]
++fn updated_table_cells_are_text() {
++  let binary = build_full_doc("Table", "intro\n", DOC_ID).expect("doc");
++  let delta = update_doc(&binary, "intro\n\n| k | v |\n|---|---|\n| x | y |\n", DOC_ID).expect("update");
++  let mut doc = DocOptions::new().with_guid(DOC_ID.to_string()).build();
++  doc.apply_update_from_binary_v1(&binary).unwrap();
++  doc.apply_update_from_binary_v1(&delta).unwrap();
++  let full = doc.encode_update_v1().unwrap();
++  let (_doc, block) = table_block(&full);
++  assert_eq!(cell_texts(&block), ["k", "v", "x", "y"]);
++  assert_eq!(orders(&block, "prop:rows."), ["a0", "a1"]);
++}
++
++
++#[test]
++fn table_round_trips_to_markdown() {
++  let markdown = "| Nom | Valeur |\n|---|---|\n| a | 1 |\n";
++  let binary = build_full_doc("Table", markdown, DOC_ID).expect("doc");
++  let result = affine_doc_loader::parse_doc_to_markdown(binary, DOC_ID.to_string(), false, None).expect("markdown");
++  assert!(result.markdown.contains("|Nom|Valeur|"), "{}", result.markdown);
++  assert!(result.markdown.contains("|a|1|"), "{}", result.markdown);
++}
