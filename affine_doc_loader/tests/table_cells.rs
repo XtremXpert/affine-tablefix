@@ -147,3 +147,53 @@ fn table_round_trips_to_markdown() {
   assert!(result.markdown.contains("|Nom|Valeur|"), "{}", result.markdown);
   assert!(result.markdown.contains("|a|1|"), "{}", result.markdown);
 }
+
+fn cell_ops(block: &Map, text: &str) -> Vec<y_octo::TextDeltaOp> {
+  block
+    .keys()
+    .filter(|key| key.starts_with("prop:cells.") && key.ends_with(".text"))
+    .filter_map(|key| block.get(key).and_then(|value| value.to_text()))
+    .find(|cell| cell.to_string() == text)
+    .unwrap_or_else(|| panic!("no cell with text {text:?}"))
+    .to_delta()
+}
+
+fn has_attr(ops: &[y_octo::TextDeltaOp], text: &str, attr: &str) -> bool {
+  ops.iter().any(|op| match op {
+    y_octo::TextDeltaOp::Insert {
+      insert: y_octo::TextInsert::Text(t),
+      format: Some(format),
+    } => t == text && format.contains_key(attr),
+    _ => false,
+  })
+}
+
+#[test]
+fn cell_inline_markdown_keeps_formatting() {
+  let markdown = "| Clé | Valeur |\n|---|---|\n| **SSH** | `root` par clé |\n| lien | [docs](https://docs.example.com) |\n| 1. pas une liste | - ni ceci |\n";
+  let binary = build_full_doc("Table", markdown, DOC_ID).expect("doc");
+  let (_doc, block) = table_block(&binary);
+
+  assert!(has_attr(&cell_ops(&block, "SSH"), "SSH", "bold"));
+  assert!(has_attr(&cell_ops(&block, "root par clé"), "root", "code"));
+  assert!(has_attr(&cell_ops(&block, "docs"), "docs", "link"));
+  // Block-level syntax inside a cell stays literal text.
+  cell_ops(&block, "1. pas une liste");
+  cell_ops(&block, "- ni ceci");
+}
+
+#[test]
+fn formatted_table_round_trips_and_is_not_rewritten() {
+  let markdown = "intro\n\n| Clé | Valeur |\n|---|---|\n| **SSH** | `root` par clé |\n";
+  let binary = build_full_doc("Table", markdown, DOC_ID).expect("doc");
+  let result = affine_doc_loader::parse_doc_to_markdown(binary.clone(), DOC_ID.to_string(), false, None).expect("md");
+  assert!(result.markdown.contains("|**SSH**|`root` par clé|"), "{}", result.markdown);
+
+  // Same markdown again: the table must be kept as is. An update always carries
+  // a little metadata, so compare with the update of a doc without table.
+  let delta = update_doc(&binary, markdown, DOC_ID).expect("update");
+  let plain = build_full_doc("Table", "intro\n", DOC_ID).expect("doc");
+  let baseline = update_doc(&plain, "intro\n", DOC_ID).expect("update");
+  assert_eq!(delta.len(), baseline.len(), "unchanged table was rewritten");
+}
+

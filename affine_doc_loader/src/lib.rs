@@ -284,7 +284,7 @@ fn table_props(rows: &[Vec<String>], id: &str) -> JsonValue {
       cells.insert(
         cell_id,
         json!({
-          "text": text_value(&plain_text_delta(row.get(column_index).map(String::as_str).unwrap_or("")))
+          "text": text_value(&markdown::table_cell_ops(row.get(column_index).map(String::as_str).unwrap_or("")))
         }),
       );
     }
@@ -295,17 +295,6 @@ fn table_props(rows: &[Vec<String>], id: &str) -> JsonValue {
     "rows": row_values,
     "cells": cells
   })
-}
-
-fn plain_text_delta(text: &str) -> Vec<TextDeltaOp> {
-  if text.is_empty() {
-    Vec::new()
-  } else {
-    vec![TextDeltaOp::Insert {
-      insert: TextInsert::Text(text.to_string()),
-      format: None,
-    }]
-  }
 }
 
 fn text_value(delta: &[TextDeltaOp]) -> JsonValue {

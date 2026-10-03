@@ -238,9 +238,14 @@ impl TableSpec {
       let mut row = Vec::new();
       for (_, column_id) in &column_entries {
         let cell_key = table_cell_text_key(&row_id, column_id);
+        // Cells are Y.Text with formatting: read them back as inline markdown,
+        // the same form the parser produces, so unchanged tables compare equal.
         let cell_text = block
           .get_value(&cell_key)
-          .and_then(|value| value_to_string(&value))
+          .and_then(|value| {
+            crate::markdown::delta_value_to_inline_markdown(&value, &crate::markdown::DeltaToMdOptions::new(None))
+              .or_else(|| value_to_string(&value))
+          })
           .unwrap_or_default();
         row.push(cell_text);
       }

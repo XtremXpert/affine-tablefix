@@ -278,7 +278,7 @@ pub(super) fn apply_table_block_props(doc: &Doc, block: &mut Map, rows: &[Vec<St
         doc,
         block,
         &table_cell_text_key(&row_id, column_id),
-        &text_ops_from_plain(cell_text),
+        &crate::markdown::table_cell_ops(cell_text),
       )?;
     }
   }

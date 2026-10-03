@@ -22,6 +22,13 @@ and `update_document`) are stored with:
   editor's format (`a0`…`az`, then `b00`…), used for rows and columns in both the y-octo
   writer and the JSON snapshot (`table_props` in `lib.rs`).
 
+- Cells keep their inline formatting. The parser already stores each cell as
+  inline markdown (`**bold**`, `` `code` ``, links are re-serialized), so
+  `table_cell_ops` parses the cell like a paragraph and writes that delta;
+  block-level syntax (`1.`, `- `, `#`) stays literal text. On read,
+  `TableSpec::from_block_map` renders the cell delta back to inline markdown,
+  so `read_document` keeps the formatting and an unchanged table compares equal.
+
 ## Tests
 
 `tests/table_cells.rs` (integration test, public API only):
@@ -36,3 +43,7 @@ All four fail on 0.1.9 and pass with the patch. Verified on a self-hosted 0.27.4
 
 Note: tables already written by earlier versions stay broken; `update_doc` keeps
 `is_exact` table blocks, so they must be rewritten (e.g. delete and re-add the table).
+
+Separate issue seen while testing on 0.1.9 (also without this patch): `update_doc`
+on any document that contains a table fails with
+`SourceMerge { property: "opaque", reason: ConcurrentEdit }`.

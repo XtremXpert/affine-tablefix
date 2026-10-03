@@ -1,5 +1,25 @@
+diff --git a/src/block_spec.rs b/src/block_spec.rs
+index 4732df0..f5e34d4 100644
+--- a/src/block_spec.rs
++++ b/src/block_spec.rs
+@@ -240,9 +240,14 @@ impl TableSpec {
+       let mut row = Vec::new();
+       for (_, column_id) in &column_entries {
+         let cell_key = table_cell_text_key(&row_id, column_id);
++        // Cells are Y.Text with formatting: read them back as inline markdown,
++        // the same form the parser produces, so unchanged tables compare equal.
+         let cell_text = block
+           .get_value(&cell_key)
+-          .and_then(|value| value_to_string(&value))
++          .and_then(|value| {
++            crate::markdown::delta_value_to_inline_markdown(&value, &crate::markdown::DeltaToMdOptions::new(None))
++              .or_else(|| value_to_string(&value))
++          })
+           .unwrap_or_default();
+         row.push(cell_text);
+       }
 diff --git a/src/lib.rs b/src/lib.rs
-index 69ebe38..afa0d84 100644
+index 69ebe38..ef3fe17 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -267,7 +267,7 @@ fn table_props(rows: &[Vec<String>], id: &str) -> JsonValue {
@@ -20,6 +40,66 @@ index 69ebe38..afa0d84 100644
        }),
      );
      for (column_index, column_id) in column_ids.iter().enumerate() {
+@@ -288,7 +288,7 @@ fn table_props(rows: &[Vec<String>], id: &str) -> JsonValue {
+       cells.insert(
+         cell_id,
+         json!({
+-          "text": text_value(&plain_text_delta(row.get(column_index).map(String::as_str).unwrap_or("")))
++          "text": text_value(&markdown::table_cell_ops(row.get(column_index).map(String::as_str).unwrap_or("")))
+         }),
+       );
+     }
+@@ -301,17 +301,6 @@ fn table_props(rows: &[Vec<String>], id: &str) -> JsonValue {
+   })
+ }
+ 
+-fn plain_text_delta(text: &str) -> Vec<TextDeltaOp> {
+-  if text.is_empty() {
+-    Vec::new()
+-  } else {
+-    vec![TextDeltaOp::Insert {
+-      insert: TextInsert::Text(text.to_string()),
+-      format: None,
+-    }]
+-  }
+-}
+-
+ fn text_value(delta: &[TextDeltaOp]) -> JsonValue {
+   json!({
+     "$blocksuite:internal:text$": true,
+diff --git a/src/markdown/mod.rs b/src/markdown/mod.rs
+index a18d42a..480b6f4 100644
+--- a/src/markdown/mod.rs
++++ b/src/markdown/mod.rs
+@@ -26,3 +26,28 @@ use super::{
+   schema::{NOTE_FLAVOUR, PAGE_FLAVOUR},
+   write::{insert_block_tree, patch_children},
+ };
++
++/// Inline delta of a table cell. The parser stores cells as inline markdown
++/// (bold, code, links are re-serialized), so a cell is parsed like a paragraph
++/// to keep its formatting; anything else (a list marker, a heading...) stays
++/// plain text.
++pub(crate) fn table_cell_ops(cell: &str) -> Vec<y_octo::TextDeltaOp> {
++  use crate::block_spec::{BlockFlavour, BlockType};
++
++  if let Ok(blocks) = parse_markdown_blocks(cell)
++    && let [block] = blocks.as_slice()
++    && block.children.is_empty()
++    && block.spec.flavour == BlockFlavour::Paragraph
++    && matches!(block.spec.block_type, None | Some(BlockType::Text))
++  {
++    return block.spec.text.clone();
++  }
++  if cell.is_empty() {
++    Vec::new()
++  } else {
++    vec![y_octo::TextDeltaOp::Insert {
++      insert: y_octo::TextInsert::Text(cell.to_string()),
++      format: None,
++    }]
++  }
++}
 diff --git a/src/schema.rs b/src/schema.rs
 index f14b4fd..1ef5d14 100644
 --- a/src/schema.rs
@@ -57,7 +137,7 @@ index f14b4fd..1ef5d14 100644
    format!("{PROP_CELLS_PREFIX}{row_id}:{column_id}{PROP_TEXT_SUFFIX}")
  }
 diff --git a/src/write/builder.rs b/src/write/builder.rs
-index d0cc4d4..338d58c 100644
+index d0cc4d4..ede3200 100644
 --- a/src/write/builder.rs
 +++ b/src/write/builder.rs
 @@ -5,7 +5,7 @@ use super::{
@@ -112,7 +192,7 @@ index d0cc4d4..338d58c 100644
 +        doc,
 +        block,
 +        &table_cell_text_key(&row_id, column_id),
-+        &text_ops_from_plain(cell_text),
++        &crate::markdown::table_cell_ops(cell_text),
 +      )?;
      }
    }
@@ -138,10 +218,10 @@ index d0cc4d4..338d58c 100644
    doc.create_map().map_err(ParseError::from)
 diff --git a/tests/table_cells.rs b/tests/table_cells.rs
 new file mode 100644
-index 0000000..5e180bc
+index 0000000..5235415
 --- /dev/null
 +++ b/tests/table_cells.rs
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,192 @@
 +//! Regression test for tables written from markdown (toeverything/AFFiNE#15466):
 +//! cells must be Y.Text and row/column orders must be fractional-indexing keys,
 +//! otherwise the editor renders empty cells and cannot insert rows or columns.
@@ -291,3 +371,46 @@ index 0000000..5e180bc
 +  assert!(result.markdown.contains("|Nom|Valeur|"), "{}", result.markdown);
 +  assert!(result.markdown.contains("|a|1|"), "{}", result.markdown);
 +}
++
++fn cell_ops(block: &Map, text: &str) -> Vec<y_octo::TextDeltaOp> {
++  block
++    .keys()
++    .filter(|key| key.starts_with("prop:cells.") && key.ends_with(".text"))
++    .filter_map(|key| block.get(key).and_then(|value| value.to_text()))
++    .find(|cell| cell.to_string() == text)
++    .unwrap_or_else(|| panic!("no cell with text {text:?}"))
++    .to_delta()
++}
++
++fn has_attr(ops: &[y_octo::TextDeltaOp], text: &str, attr: &str) -> bool {
++  ops.iter().any(|op| match op {
++    y_octo::TextDeltaOp::Insert {
++      insert: y_octo::TextInsert::Text(t),
++      format: Some(format),
++    } => t == text && format.contains_key(attr),
++    _ => false,
++  })
++}
++
++#[test]
++fn cell_inline_markdown_keeps_formatting() {
++  let markdown = "| Clé | Valeur |\n|---|---|\n| **SSH** | `root` par clé |\n| lien | [docs](https://docs.example.com) |\n| 1. pas une liste | - ni ceci |\n";
++  let binary = build_full_doc("Table", markdown, DOC_ID).expect("doc");
++  let (_doc, block) = table_block(&binary);
++
++  assert!(has_attr(&cell_ops(&block, "SSH"), "SSH", "bold"));
++  assert!(has_attr(&cell_ops(&block, "root par clé"), "root", "code"));
++  assert!(has_attr(&cell_ops(&block, "docs"), "docs", "link"));
++  // Block-level syntax inside a cell stays literal text.
++  cell_ops(&block, "1. pas une liste");
++  cell_ops(&block, "- ni ceci");
++}
++
++#[test]
++fn formatted_table_round_trips_to_markdown() {
++  let markdown = "intro\n\n| Clé | Valeur |\n|---|---|\n| **SSH** | `root` par clé |\n";
++  let binary = build_full_doc("Table", markdown, DOC_ID).expect("doc");
++  let result = affine_doc_loader::parse_doc_to_markdown(binary.clone(), DOC_ID.to_string(), false, None).expect("md");
++  assert!(result.markdown.contains("|**SSH**|`root` par clé|"), "{}", result.markdown);
++}
++
